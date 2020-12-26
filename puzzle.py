@@ -1,9 +1,14 @@
-import yaml
+from yaml import safe_load as load_yaml
 import re
 import itertools
-import enum
+from enum import Enum
+from time import perf_counter
+from humanize.time import naturaldelta
+from humanize.number import apnumber, ordinal, intword, scientific, intcomma
+from datetime import timedelta
+from math import perm as permutations, log10
 
-class Side( enum.Enum ):
+class Side( Enum ):
   LOWER = 'l'
   l = 'l'
   UPPER = 'u'
@@ -31,29 +36,39 @@ class Face:
   def fits( self, other ):
     return self._figure == other._figure and self._side != other._side
 
-class Edge( enum.Enum ):
+class Edge( Enum ):
   BASE = 'b'
   RIGHT = 'r'
   LEFT = 'l'
 
 class Tile:
   def __init__( self, base: Face, right: Face, left: Face ):
-    self.base = base
-    self.right = right
-    self.left = left
+    self._edges = { Edge.BASE: base, Edge.RIGHT: right, Edge.LEFT: left }
   
   def __repr__( self ):
-    return f'Tile({ self.base },{ self.right },{ self.left })'
+    return f'Tile({ self._edges[ Edge.BASE ] },{ self._edges[ Edge.RIGHT ] },{ self._edges[ Edge.LEFT ] })'
   
   def __getitem__( self, edge: Edge ):
-    return self.base if edge == Edge.BASE else self.right if edge == Edge.RIGHT else self.left
+    return self._edges[ edge ]
   
   def rotate( self, rot: int = 1 ):
     r = rot % 3
     if r == 1:
-      self.base, self.right, self.left = self.left, self.base, self.right
+      self._edges[ Edge.BASE ], self._edges[ Edge.RIGHT ], self._edges[ Edge.LEFT ] = self._edges[ Edge.LEFT ], self._edges[ Edge.BASE ], self._edges[ Edge.RIGHT ]
     elif r == 2:
-      self.base, self.right, self.left = self.right, self.left, self.base
+      self._edges[ Edge.BASE ], self._edges[ Edge.RIGHT ], self._edges[ Edge.LEFT ] = self._edges[ Edge.RIGHT ], self._edges[ Edge.LEFT ], self._edges[ Edge.BASE ]
+  
+  @property
+  def base( self ):
+    return self._edges[ Edge.BASE ]
+  
+  @property
+  def right( self ):
+    return self._edges[ Edge.RIGHT ]
+  
+  @property
+  def left( self ):
+    return self._edges[ Edge.LEFT ]
 
 def face_str( face ):
   return '--' if face is None else str( face )
@@ -87,17 +102,17 @@ face_re = re.compile( r'^[1-6][lu]$', flags=re.IGNORECASE )
 
 def check_face( face ):
   if not face_re.match( face ):
-    raise RuntimeError( f'Malformed face: {face}' )
+    raise RuntimeError( f'Malformed face: { face }' )
 
 def check_tile( tile ):
   if len( tile ) != 3:
-    raise RuntimeError( f'Malformed tile: {tile}' )
+    raise RuntimeError( f'Malformed tile: { tile }' )
   for face in tile:
     check_face( face )
 
 def check_board( board ):
   if len( board ) % 6 != 0:
-    raise RuntimeError( f'Malformed board: {board}' )
+    raise RuntimeError( f'Malformed board: { board }' )
   for face in board:
     check_face( face )
 
@@ -107,31 +122,35 @@ def side( board ):
 def spaces( s ):
   return 6 * s**2
 
+def possibilities( board, tiles ):
+  s = spaces( side( board ) )
+  t = len( tiles )
+  return permutations( max( s, t ), min( s, t ) ) * 3**t
+
 def check_game( board, tiles ):
   if len( tiles ) != spaces( side( board ) ):
-    raise RuntimeError( f'Number of tiles ({ len( tiles ) }) does not match the number of free spaces ({ spaces( side( board ) ) }).' )
+    raise RuntimeError( f'Malformed game: { len( tiles ) } tiles for { spaces( side( board ) ) } spaces.' )
   counts = { s: [ 0, 0 ] for s in range( 1, 7 ) }
-  def counter( face: Face ):
+  def faces():
+    yield from board
+    for tile in tiles:
+      yield from ( tile[ edge ] for edge in Edge )
+  for face in faces():
     counts[ face.figure ][ 0 if face.side == Side.LOWER else 1 ] += 1
-  for face in board:
-    counter( face )
-  for tile in tiles:
-    for edge in Edge:
-      counter( tile[ edge ] )
   for figure, pair in counts.items():
     if pair[ 0 ] != pair[ 1 ]:
-      raise RuntimeError( f'Faces mismatch for figure {figure}: {pair[ 0 ]} lower, {pair[ 1 ]} upper parts.' )
+      raise RuntimeError( f'Malformed game: Figure { figure } has { pair[ 0 ] } lower and { pair[ 1 ] } upper parts.' )
 
 def load_tiles( filename ):
   with open( filename, 'r' ) as input:
-    tiles = yaml.safe_load( input )
+    tiles = load_yaml( input )
   for tile in tiles:
     check_tile( tile )
   return tuple( Tile( *( Face( s ) for s in tile ) ) for tile in tiles )
 
 def load_board( filename ):
   with open( filename, 'r' ) as input:
-    board = yaml.safe_load( input )
+    board = load_yaml( input )
   check_board( board )
   return tuple( Face( s ) for s in board )
 
@@ -161,17 +180,20 @@ def adj_spaces( side, row, col ):
   yield row - base_off, col if row <= center else col - base_off, Edge.RIGHT
   yield row - base_off, col + base_off if row <= center else col, Edge.LEFT
 
-try_count = 0
 def try_tile( tile, board, row, col ):
-  global try_count
-  try_count += 1
   for adj_row, adj_col, edge in adj_spaces( side( board ), row, col ):
     adj = board[ adj_row ][ adj_col ]
     if adj is not None and not tile[ edge ].fits( board[ adj_row ][ adj_col ][ edge ] ):
       return False
   return True
 
+num_try = 0
+num_fail = 0
+num_try_sol = []
+num_fail_sol = []
+time_sol = []
 def solve( solution, tiles ):
+  global num_fail, num_try, num_fail_sol, num_try_sol, time_sol, time_print, time_solve
   if len( tiles ) > 0:
     for row, line in enumerate( solution ):
       for col, space in enumerate( line ):
@@ -179,20 +201,52 @@ def solve( solution, tiles ):
           for k, tile in enumerate( tiles ):
             for _ in range( 3 ):
               tile.rotate()
+              num_try += 1
               if try_tile( tile, solution, row, col ):
                 solution[ row ][ col ] = tile
                 yield from solve( solution, tiles[ :k ] + tiles[ k + 1: ] )
+          num_fail += 1
           solution[ row ][ col ] = None
           return
   else:
+    num_try_sol.append( num_try )
+    num_fail_sol.append( num_fail )
+    time_sol.append( perf_counter() - time_print - time_solve )
     yield solution
 
-tiles = load_tiles( 'tiles-2.yaml' )
-board = load_board( 'board-2.yaml' )
+tiles = load_tiles( 'tiles.yaml' )
+board = load_board( 'board.yaml' )
 
 check_game( board, tiles )
 
-for num, solution in enumerate( solve( init_solution( board ), tiles ), 1 ):
-  print( f'--- Solution {num} ---' )
+def number_str( number ):
+  if number < 100:
+    return apnumber( number )
+  elif number < 1_000_000_000:
+    return intcomma( number )
+  else:
+    return f'{number:.2e}'
+
+print( f'The puzzle has { apnumber( len( tiles ) ) } tiles.' )
+print( f'The puzzle has { apnumber( spaces( side( board ) ) ) } spaces.' )
+print( f'The puzzle has { number_str( possibilities( board, tiles ) ) } possibilities.')
+
+time_solve: float = perf_counter()
+time_print: float = 0
+for num_sol, solution in enumerate( solve( init_solution( board ), tiles ), 1 ):
+  tp = perf_counter()
+  print( f'--- Solution { num_sol } ---' )
   print_board( solution )
+  time_print += perf_counter() - tp
   pass
+time_solve = perf_counter() - time_solve - time_print
+
+def time_str( time: float ):
+  return naturaldelta( timedelta( seconds=time ), minimum_unit="Microseconds" )
+
+print( f'I spent { time_str( time_solve ) } solving the puzzle.' )
+print( f'I tried { number_str( num_try ) } combinations.' )
+print( f'I had { number_str( num_fail ) } failed attempts.' )
+print( f'I found { number_str( num_sol ) } solutions.' )
+for n, ( y, f, t ) in enumerate( zip( num_try_sol, num_fail_sol, time_sol ), 1 ):
+  print( f'I found the { ordinal( n ) } solution after { time_str( t ) } with { number_str( y ) } tries and { number_str( f ) } fails.')
