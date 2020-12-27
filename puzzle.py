@@ -1,12 +1,13 @@
+from datetime import timedelta
+from enum import Enum
+from humanize.number import apnumber, ordinal, intcomma
+from humanize.time import naturaldelta
+from itertools import chain, count
+from math import perm as permutations
+from time import perf_counter
 from yaml import safe_load as load_yaml
 import re
-import itertools
-from enum import Enum
-from time import perf_counter
-from humanize.time import naturaldelta
-from humanize.number import apnumber, ordinal, intword, scientific, intcomma
-from datetime import timedelta
-from math import perm as permutations, log10
+import sys
 
 class Side( Enum ):
   LOWER = 'l'
@@ -84,13 +85,13 @@ def tile_str( tile, row = 1 ):
 
 def line_offsets( s ):
   yield s + 1
-  yield from itertools.chain( *zip( range( s - 1, -1, -1 ), range( s, 0, -1 ) ) )
-  yield from itertools.chain( *zip( range( 1, s + 1 ), range( s ) ) )
+  yield from chain( *zip( range( s - 1, -1, -1 ), range( s, 0, -1 ) ) )
+  yield from chain( *zip( range( 1, s + 1 ), range( s ) ) )
   yield s + 1
 
 def print_board( board ):
   l = len( board )
-  for r, row, o in zip( itertools.count( l - 1, -1 ), reversed( board ), line_offsets( side( board ) ) ):
+  for r, row, o in zip( count( l - 1, -1 ), reversed( board ), line_offsets( side( board ) ) ):
     print( '        ' * o, end='' )
     print( *( tile_str( tile, r ) for tile in row ), sep='      ' )
 
@@ -156,8 +157,8 @@ def load_board( filename ):
 
 def init_solution( board ):
   side: int = len( board ) // 6
-  lengths = tuple( itertools.chain( ( side, ), *( ( l + 2, l + 1 ) for l in range( side, 2 * side ) ) ) )
-  solution = [ [ None ] * l for l in itertools.chain( lengths, reversed( lengths ) ) ]
+  lengths = tuple( chain( ( side, ), *( ( l + 2, l + 1 ) for l in range( side, 2 * side ) ) ) )
+  solution = [ [ None ] * l for l in chain( lengths, reversed( lengths ) ) ]
 
   faces = ( f for f in board )
   solution[ 0 ] = [ Tile( next( faces ), None, None ) for _ in solution[ 0 ] ]
@@ -223,13 +224,13 @@ def number_str( number ):
   if number < 100:
     return apnumber( number )
   elif number < 1_000_000_000:
-    return intcomma( number )
+    return intcomma( int( number ) )
   else:
-    return f'{number:.2e}'
+    return f'{number:.1e}'
 
 print( f'The puzzle has { apnumber( len( tiles ) ) } tiles.' )
 print( f'The puzzle has { apnumber( spaces( side( board ) ) ) } spaces.' )
-print( f'The puzzle has { number_str( possibilities( board, tiles ) ) } possibilities.')
+print( f'The puzzle has { number_str( possibilities( board, tiles ) ) } combinations.')
 
 time_solve: float = perf_counter()
 time_print: float = 0
@@ -241,11 +242,16 @@ for num_sol, solution in enumerate( solve( init_solution( board ), tiles ), 1 ):
   pass
 time_solve = perf_counter() - time_solve - time_print
 
-def time_str( time: float ):
-  return naturaldelta( timedelta( seconds=time ), minimum_unit="Microseconds" )
+def time_str( time ):
+  if time < sys.maxsize:
+    return naturaldelta( timedelta( seconds=time ), minimum_unit="Microseconds" )
+  else:
+    return f'{ number_str( time // 3600 // 24 // 365 ) } years'
 
 print( f'I spent { time_str( time_solve ) } solving the puzzle.' )
 print( f'I tried { number_str( num_try ) } combinations.' )
+print( f'I checked { number_str( num_try / time_solve ) } combinations per second.' )
+print( f'I would have needed { time_str( time_solve * possibilities( board, tiles ) / num_try ) } to try all possible combinations.')
 print( f'I had { number_str( num_fail ) } failed attempts.' )
 print( f'I found { number_str( num_sol ) } solutions.' )
 for n, ( y, f, t ) in enumerate( zip( num_try_sol, num_fail_sol, time_sol ), 1 ):
